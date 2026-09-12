@@ -1,3 +1,3 @@
 # Metadata
 Metadata reader / remover
-- nothing here right now
+website to check how it works is here
