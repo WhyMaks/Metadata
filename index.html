@@ -97,6 +97,8 @@
   }
   .scan-box .meta-line { color: var(--error); }
   .scan-box .clean-line { color: var(--ok); }
+  .scan-box .read-line { color: var(--text); word-break: break-word; }
+  .scan-box .read-line span.src { color: var(--text-dim); }
   .scan-summary { font-weight: 700; color: var(--text); margin-bottom: 8px; font-family: 'Space Grotesk', sans-serif; }
 
   button.go {
@@ -160,6 +162,28 @@
   .quality-row input[type="range"] { flex: 1; accent-color: var(--accent); }
   .quality-row span { font-family: ui-monospace, monospace; font-size: 13px; color: var(--text-dim); width: 36px; text-align: right; }
 
+  .mode-row {
+    display: flex;
+    gap: 10px;
+  }
+  .mode-btn {
+    flex: 1;
+    background: var(--field);
+    color: var(--text-dim);
+    border: none;
+    border-radius: 14px;
+    padding: 14px;
+    font-family: inherit;
+    font-size: 16px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.2s ease, color 0.2s ease;
+  }
+  .mode-btn.active {
+    background: var(--accent);
+    color: #2a1d0c;
+  }
+
   .note {
     font-size: 13px;
     color: var(--text-dim);
@@ -174,6 +198,13 @@
   <h1>MetaWipe</h1>
 
   <div class="field">
+    <div class="mode-row" id="modeRow">
+      <button class="mode-btn active" data-mode="read">read</button>
+      <button class="mode-btn" data-mode="wipe">wipe</button>
+    </div>
+  </div>
+
+  <div class="field">
     <label>file</label>
     <div class="dropzone" id="dropzone">
       <input type="file" id="fileInput" accept="image/jpeg,image/png,image/webp">
@@ -184,7 +215,7 @@
 
   <div class="collapsible" id="scanSection">
     <div class="collapsible-inner">
-      <label>found</label>
+      <label>found & read</label>
       <div class="scan-box" id="scanBox"></div>
     </div>
   </div>
@@ -199,7 +230,8 @@
     </div>
   </div>
 
-  <button class="go" id="goBtn" onclick="run()" disabled>wipe metadata</button>
+  <button class="go" id="readBtn" onclick="doRead()" disabled>read metadata</button>
+  <button class="go" id="goBtn" onclick="run()" disabled style="display:none">wipe metadata</button>
   <div class="status" id="status"></div>
 
   <div class="collapsible" id="resultSection">
@@ -221,11 +253,35 @@
 <script src="metawipe.js"></script>
 <script>
 let selectedFile = null;
+let mode = 'read';
 
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
 const qualitySlider = document.getElementById('qualitySlider');
 const qualityValue = document.getElementById('qualityValue');
+const modeRow = document.getElementById('modeRow');
+const readBtn = document.getElementById('readBtn');
+const goBtn = document.getElementById('goBtn');
+
+modeRow.addEventListener('click', (e) => {
+  const btn = e.target.closest('.mode-btn');
+  if (!btn) return;
+  mode = btn.dataset.mode;
+  modeRow.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b === btn));
+  updateModeUI();
+});
+
+function updateModeUI() {
+  const isRead = mode === 'read';
+  readBtn.style.display = isRead ? '' : 'none';
+  goBtn.style.display = isRead ? 'none' : '';
+  // quality only matters for wipe of JPEGs
+  const showQuality = !isRead && selectedFile && selectedFile.type === 'image/jpeg';
+  document.getElementById('qualitySection').classList.toggle('open', !!showQuality);
+  if (isRead) {
+    document.getElementById('resultSection').classList.remove('open');
+  }
+}
 
 dropzone.addEventListener('click', () => fileInput.click());
 dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
@@ -249,6 +305,14 @@ function formatBytes(n) {
   return (n / (1024 * 1024)).toFixed(2) + ' MB';
 }
 
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 async function handleFile(file) {
   selectedFile = file;
   document.getElementById('fileInfo').textContent = `${file.name} -- ${formatBytes(file.size)}`;
@@ -257,13 +321,22 @@ async function handleFile(file) {
 
   const buffer = await file.arrayBuffer();
   const report = scanMetadata(buffer);
-  renderScan(report, file.size);
+  let readReport = { fields: [] };
+  try {
+    if (typeof readMetadataAsync === 'function') {
+      readReport = await readMetadataAsync(buffer);
+    } else if (typeof readMetadata === 'function') {
+      readReport = readMetadata(buffer);
+    }
+  } catch (e) { readReport = { fields: [] }; }
+  renderScan(report, readReport);
 
-  document.getElementById('goBtn').disabled = false;
-  document.getElementById('qualitySection').classList.toggle('open', file.type === 'image/jpeg');
+  readBtn.disabled = false;
+  goBtn.disabled = false;
+  updateModeUI();
 }
 
-function renderScan(report, fileSize) {
+function renderScan(report, readReport) {
   const box = document.getElementById('scanBox');
   let html = '';
 
@@ -277,11 +350,48 @@ function renderScan(report, fileSize) {
 
   report.segments.forEach(s => {
     const cls = s.isMetadata ? 'meta-line' : '';
-    html += `<div class="${cls}">${s.name} -- ${s.bytes}b${s.isMetadata ? ' [metadata]' : ''}</div>`;
+    html += `<div class="${cls}">${escapeHtml(s.name)} -- ${s.bytes}b${s.isMetadata ? ' [metadata]' : ''}</div>`;
   });
+
+  const fields = (readReport && readReport.fields) || [];
+  if (fields.length) {
+    html += `<div class="scan-summary" style="margin-top:10px">read values:</div>`;
+    fields.forEach(f => {
+      html += `<div class="read-line"><span class="src">${escapeHtml(f.source)} / ${escapeHtml(f.name)}:</span> ${escapeHtml(f.value)}</div>`;
+    });
+  } else if (report.format !== 'other') {
+    html += `<div class="scan-summary" style="margin-top:10px">read values: none found</div>`;
+  }
 
   box.innerHTML = html || '<div>no structured segments recognised</div>';
   document.getElementById('scanSection').classList.add('open');
+}
+
+async function doRead() {
+  const statusEl = document.getElementById('status');
+  statusEl.className = 'status';
+
+  if (!selectedFile) { statusEl.textContent = 'choose a file first'; statusEl.className = 'status error'; return; }
+
+  readBtn.disabled = true;
+  const originalText = readBtn.textContent;
+  readBtn.textContent = 'reading...';
+
+  try {
+    const buffer = await selectedFile.arrayBuffer();
+    const report = scanMetadata(buffer);
+    const readReport = await readMetadataAsync(buffer);
+    renderScan(report, readReport);
+    const n = readReport.fields.length;
+    statusEl.textContent = n === 0 ? 'no readable metadata values found' : `read ${n} value(s)`;
+    statusEl.className = 'status ok';
+  } catch (err) {
+    statusEl.textContent = err.message;
+    statusEl.className = 'status error';
+  } finally {
+    readBtn.disabled = false;
+    readBtn.textContent = originalText;
+  }
 }
 
 async function run() {
